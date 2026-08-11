@@ -1,0 +1,10 @@
+*.o
+mosls
+moscp
+mosrecover
+
+# disk images are not part of the source tree
+*.img
+*.imd
+*.scp
+*.dsk
