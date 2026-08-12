@@ -63,6 +63,7 @@ static void print_verbose_header(const mos_image *img)
 	mos_space(img, &used, &freecl, &reserved, &lost, &unknown);
 
 	printf("Image:      %s (%ld bytes)\n", img->path, img->size);
+	printf("Source:     %s\n", img->source);
 	printf("Format:     %s - %s\n", f->name, f->desc);
 	printf("Geometry:   %d tracks x %d sectors x %d bytes, %d sectors/cluster,"
 	       " %d clusters\n", f->tracks, f->sectors, f->sector_size,
@@ -89,6 +90,10 @@ static void print_verbose_header(const mos_image *img)
 		       img->fat_first_invalid, unknown);
 	if (img->fat_mismatch)
 		printf("Warning:    FAT copies disagree, majority vote used\n");
+	if (img->sec_error + img->sec_missing + img->sec_deleted > 0)
+		printf("Warning:    %d sector(s) unreadable, %d missing, %d with a"
+		       " deleted address mark\n", img->sec_error, img->sec_missing,
+		       img->sec_deleted);
 	if ((i = mos_overlaps(img)) > 0)
 		printf("Warning:    %d cluster(s) claimed by more than one file; the"
 		       " FAT does not\n            match the directory, affected files"
@@ -170,6 +175,11 @@ int main(int argc, char **argv)
 		if (file->error != NULL) {
 			fprintf(stderr, "%s: %s: %s\n", progname,
 			        name[0] != '\0' ? name : "(blank)", file->error);
+			rc = 1;
+		}
+		if ((j = mos_file_bad_sectors(&img, file)) > 0) {
+			fprintf(stderr, "%s: %s: %d sector(s) were not read cleanly\n",
+			        progname, name[0] != '\0' ? name : "(blank)", j);
 			rc = 1;
 		}
 		if (chains && file->chain_len > 0)

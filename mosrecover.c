@@ -636,6 +636,9 @@ int main(int argc, char **argv)
 		       r.result.covered, fatcol,
 		       file->name[0] != '\0' ? file->name : "(blank)",
 		       file->deleted ? "  [deleted]" : "");
+		if ((j = mos_file_bad_sectors(&img, file)) > 0)
+			fprintf(stderr, "%s: %s: %d sector(s) of the FAT chain were not"
+			        " read cleanly\n", progname, file->name, j);
 		if (owner != NULL) {
 			for (j = 0; j < r.chain_len; j++) {
 				if (owner[r.chain[j]] == 0)

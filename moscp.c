@@ -101,12 +101,15 @@ static int copy_one(const mos_image *img, const mos_file *file,
 	char *conv = NULL;
 	long len;
 	char err[512];
-	int rc;
+	int rc, bad;
 
 	if (mos_read_file(img, file, &buf, &len, err, sizeof err) != 0) {
 		fprintf(stderr, "%s: %s\n", progname, err);
 		return -1;
 	}
+	if ((bad = mos_file_bad_sectors(img, file)) > 0)
+		fprintf(stderr, "%s: %s: %d sector(s) were not read cleanly, the copy"
+		        " is incomplete\n", progname, file->name, bad);
 	/* Only attribute 0x00 is a MOS BASIC data file.  A tokenised BASIC
 	 * program is binary: cutting it at the first 0x1a or rewriting line ends
 	 * and umlauts would corrupt it. */
@@ -140,7 +143,7 @@ static int copy_one(const mos_image *img, const mos_file *file,
 	}
 	rc = write_out(path, buf, len, overwrite);
 	free(buf);
-	return rc;
+	return rc != 0 ? -1 : bad;      /* > 0: written, but data is incomplete */
 }
 
 int main(int argc, char **argv)
@@ -148,7 +151,7 @@ int main(int argc, char **argv)
 	const mos_format *fmt = NULL;
 	unsigned flags = 0;
 	int text = 0, utf8 = 0, overwrite = 0, casefold = 1;
-	int opt, i, j, destdir, npatterns, copied = 0, rc = 0;
+	int opt, i, i2, j, destdir, npatterns, copied = 0, rc = 0;
 	const char *image, *dest;
 	char err[512];
 	mos_image img;
@@ -214,10 +217,14 @@ int main(int argc, char **argv)
 				rc = 1;
 				break;
 			}
-			if (copy_one(&img, file, dest, destdir, text, utf8, overwrite) != 0)
+			i2 = copy_one(&img, file, dest, destdir, text, utf8, overwrite);
+			if (i2 < 0) {
 				rc = 1;
-			else
+			} else {
 				copied++;
+				if (i2 > 0)
+					rc = 1;         /* copied, but not everything was read */
+			}
 		}
 		if (found == 0) {
 			fprintf(stderr, "%s: %s: no such file on %s\n", progname, pattern,

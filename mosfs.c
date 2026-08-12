@@ -13,6 +13,7 @@
  * Public License in the file LICENSE for more details.
  */
 #include "mosfs.h"
+#include "mosimd.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -84,7 +85,8 @@ static const uint8_t *track_sector(const mos_image *img, int track, int sector)
 	return img->data + lsn_offset(img, (long)track * f->sectors + sector);
 }
 
-static int read_image(mos_image *img, const char *path, char *err, size_t errlen)
+static int read_file(const char *path, uint8_t **buf, long *len,
+                     char *err, size_t errlen)
 {
 	FILE *fp;
 	struct stat st;
@@ -99,21 +101,69 @@ static int read_image(mos_image *img, const char *path, char *err, size_t errlen
 		fclose(fp);
 		return -1;
 	}
-	img->size = (long)st.st_size;
-	if ((img->data = malloc((size_t)img->size)) == NULL) {
-		snprintf(err, errlen, "out of memory (%ld bytes)", img->size);
+	*len = (long)st.st_size;
+	if ((*buf = malloc((size_t)(*len > 0 ? *len : 1))) == NULL) {
+		snprintf(err, errlen, "out of memory (%ld bytes)", *len);
 		fclose(fp);
 		return -1;
 	}
-	n = (long)fread(img->data, 1, (size_t)img->size, fp);
-	if (n != img->size) {
-		snprintf(err, errlen, "%s: short read (%ld of %ld bytes)",
-		         path, n, img->size);
+	n = (long)fread(*buf, 1, (size_t)*len, fp);
+	if (n != *len) {
+		snprintf(err, errlen, "%s: short read (%ld of %ld bytes)", path, n, *len);
+		free(*buf);
+		*buf = NULL;
 		fclose(fp);
 		return -1;
 	}
 	fclose(fp);
 	return 0;
+}
+
+/*
+ * Load the image.  ImageDisk files are decoded into the same flat layout the
+ * rest of the code works on, but keep their per sector read status.
+ */
+static int read_image(mos_image *img, const char *path, char *err, size_t errlen)
+{
+	uint8_t *raw;
+	long rawlen;
+
+	if (read_file(path, &raw, &rawlen, err, errlen) != 0)
+		return -1;
+
+	if (!mos_imd_detect(raw, rawlen)) {
+		img->data = raw;
+		img->size = rawlen;
+		snprintf(img->source, sizeof img->source, "flat sector image");
+		return 0;
+	}
+
+	{
+		mos_imd imd;
+
+		if (mos_imd_load(raw, rawlen, &imd, err, errlen) != 0) {
+			free(raw);
+			return -1;
+		}
+		free(raw);
+		img->data = imd.data;
+		img->size = imd.size;
+		img->secstatus = imd.status;
+		img->sec_error = imd.bad;
+		img->sec_missing = imd.missing;
+		img->sec_deleted = imd.deleted;
+		snprintf(img->source, sizeof img->source,
+		         "ImageDisk, %d tracks x %d sectors x %d bytes, head %d%s%s",
+		         imd.tracks, imd.sectors, imd.sector_size, imd.head,
+		         imd.doublestep ? ", double stepped" : "",
+		         (imd.heads_seen & ~(1 << imd.head)) ? ", second head ignored"
+		                                             : "");
+		if (imd.outside > 0)
+			snprintf(img->source + strlen(img->source),
+			         sizeof img->source - strlen(img->source),
+			         ", %d misnumbered sector(s) dropped", imd.outside);
+		return 0;
+	}
 }
 
 /*
@@ -380,6 +430,7 @@ void mos_close(mos_image *img)
 		free(img->files[i].chain);
 	free(img->files);
 	free(img->data);
+	free(img->secstatus);
 	free(img->path);
 	memset(img, 0, sizeof *img);
 }
@@ -446,6 +497,25 @@ int mos_cluster_is_meta(const mos_image *img, int cluster)
 	long dir_first = (long)f->dir_track * f->sectors;
 
 	return last >= dir_first && first <= dir_first + f->sectors - 1;
+}
+
+int mos_file_bad_sectors(const mos_image *img, const mos_file *file)
+{
+	const mos_format *f = img->fmt;
+	int i, j, bad = 0;
+
+	if (img->secstatus == NULL || file->error != NULL)
+		return 0;
+	for (i = 0; i < file->chain_len; i++) {
+		int nsec = (i == file->chain_len - 1) ? file->last_sectors
+		                                     : f->cluster_sectors;
+		long lsn = (long)file->chain[i] * f->cluster_sectors;
+
+		for (j = 0; j < nsec; j++)
+			if (img->secstatus[lsn + j] != MOS_SEC_OK)
+				bad++;
+	}
+	return bad;
 }
 
 void mos_space(const mos_image *img, int *used, int *freecl, int *reserved,

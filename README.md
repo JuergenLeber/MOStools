@@ -26,14 +26,44 @@ Disk images are deliberately not part of this repository (see `.gitignore`).
 The examples below use `alphatronic-system30.img`, a 160 KB MOS 3.0 system
 disk; `make check` runs `mosls` against it.
 
+## Input formats
+
+All three tools take either a **flat sector image** (`.img`, 163840 bytes for a
+160 KB disk) or an **ImageDisk file** (`.imd`, as written by ImageDisk, HxC and
+similar), detected by content rather than by file name. Prefer `.imd` when you
+have it, because a flat image cannot carry two things that matter:
+
+* **Whether each sector actually read.** IMD records CRC/data errors, deleted
+  address marks and unreadable sectors per sector. A flat image turns those into
+  zeros, which `mosrecover` would then cheerfully treat as file data. With an
+  IMD, the tools name the affected files instead, and `moscp` exits non-zero
+  rather than pretending the copy is complete.
+* **The sector numbers as read.** Some P2 system disks carry a deliberately
+  misnumbered sector on track 0 as copy protection — sector 19 where 16 belongs,
+  which the drive reports as a CRC error. `mosls -v` says so and marks the
+  missing logical sector, instead of depending on what a converter decided.
+
+Odd captures are handled too: a 40-track disk read in an 80-track drive lands on
+even cylinders only, and side 2 of a single-sided disk is often captured as
+well. Both are collapsed automatically, and `mosls -v` reports what was used:
+
+```
+Source:     ImageDisk, 40 tracks x 16 sectors x 256 bytes, head 0, double stepped, second head ignored
+```
+
+Head 0 is always used, since MOS disks are single sided; there is no switch for
+picking side 2 because no two-sided MOS disk exists here to test it against.
+
 ## Usage
 
 ```sh
 $ mosls -v -l alphatronic-system30.img
 Image:      alphatronic-system30.img (163840 bytes)
+Source:     flat sector image
 Format:     mos160 - single sided, 40 tracks, 16 sectors, 256 bytes/sector
 Geometry:   40 tracks x 16 sectors x 256 bytes, 4 sectors/cluster, 160 clusters
 Directory:  track 20, sectors 0-10
+Boot cfg:   2 drive(s), 4 file(s)
 Space:      7 clusters used, 89 free (91136 bytes), 44 reserved
 Warning:    3 allocated cluster(s) not owned by any file
 Warning:    FAT area ends at cluster 8c (junk from 8d on), 20 cluster(s) unaccounted for
@@ -98,6 +128,11 @@ moscp alphatronic-system30.img AUTOLOAD - | xxd | less
 Patterns are shell wildcards, matched case-insensitively. MOS names may contain
 spaces (`BRIEF 91`), so quote them.
 
+Without `-t` you get the file exactly as it sits on the disk: whole 256-byte
+sectors, the logical end marked by `0x1a`, and the rest of the last sector
+zero-filled. That padding is on the disk, not an extraction fault — `-t` cuts
+there, and `-u` fixes the umlauts.
+
 ### Recovering a disk with a stale FAT
 
 MOS keeps the allocation table in RAM and writes it back when the disk is
@@ -155,6 +190,9 @@ Read the status column honestly:
 | `partial`   | the file parses up to the byte count shown and then stops - no cluster on the disk continues it, so the rest is overwritten or gone |
 | `no parse`  | neither parser locks on: binary or a random-access data file |
 
+Feed it an `.imd` where you have one: a cluster whose sectors did not read
+cleanly is reported per file, so a recovery is not silently built on zeros.
+
 On healthy disks it doubles as a verifier: `mosrecover` on both intact sample
 disks reproduces every FAT chain exactly, with no `*` and no overlaps.
 
@@ -196,8 +234,9 @@ attributes, chains — is unchanged.
 
 The only geometry confirmed so far (`mos160`) is 40 tracks × 16 sectors ×
 256 bytes = 163840 bytes, single sided, sectors in linear order in the image
-file (`LSN = track * 16 + sector`) with no interleave. `mosls`/`moscp` pick the
-format by image size; `-f` forces one.
+file (`LSN = track * 16 + sector`) with no interleave — the sector maps in five
+IMD captures are all `1…16` in ascending order, so the flat layout is faithful.
+The format is picked by image size; `-f` forces one.
 
 A `mos80` profile (same layout with 128-byte sectors, 81920 bytes) is included
 because the MOS floppy driver supported 80 KB media, but it is **unverified** —

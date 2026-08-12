@@ -7,7 +7,7 @@ PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 
 PROGS   = mosls moscp mosrecover
-OBJS    = mosfs.o
+OBJS    = mosfs.o mosimd.o
 
 all: $(PROGS)
 
@@ -21,6 +21,7 @@ mosrecover: mosrecover.o $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ mosrecover.o $(OBJS)
 
 mosfs.o mosls.o moscp.o mosrecover.o: mosfs.h
+mosfs.o mosimd.o: mosimd.h
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<

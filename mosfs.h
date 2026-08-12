@@ -48,6 +48,15 @@
 #define MOS_FAT_RESERVED  0xfeu  /* system area / directory track          */
 #define MOS_FAT_FREE      0xffu  /* unallocated                            */
 
+/*
+ * Per sector state of the image.  A flat .img cannot say anything about read
+ * failures, so everything is MOS_SEC_OK there; an .imd source fills these in.
+ */
+#define MOS_SEC_OK        0
+#define MOS_SEC_ERROR     1   /* read back with a CRC or data error      */
+#define MOS_SEC_MISSING   2   /* not present in the image at all         */
+#define MOS_SEC_DELETED   3   /* carries a deleted data address mark     */
+
 /* mos_open() flags */
 #define MOS_SCAN_ALL      0x01   /* do not stop at the first 0xff entry    */
 #define MOS_KEEP_DELETED  0x02   /* report deleted entries as well         */
@@ -89,6 +98,11 @@ typedef struct {
 	char     *path;
 	uint8_t  *data;
 	long      size;
+	char      source[128];   /* how the image was read in, for reporting  */
+	uint8_t  *secstatus;     /* MOS_SEC_* per sector, NULL when all fine  */
+	int       sec_error;     /* sectors read with an error                */
+	int       sec_missing;   /* sectors absent from the image             */
+	int       sec_deleted;   /* sectors with a deleted address mark       */
 	int       nclusters;
 	uint8_t   fat[256];
 	uint8_t   fat_ok[256];   /* per entry: inside the usable FAT area      */
@@ -118,6 +132,12 @@ void mos_close(mos_image *img);
 /* Read the data of one file.  *buf is malloc()ed and must be free()d. */
 int  mos_read_file(const mos_image *img, const mos_file *file,
                    uint8_t **buf, long *len, char *err, size_t errlen);
+
+/*
+ * Sectors of this file that could not be read properly.  Always 0 for a flat
+ * image, which has no way of knowing.  Use it before trusting file contents.
+ */
+int  mos_file_bad_sectors(const mos_image *img, const mos_file *file);
 
 /* Raw cluster access, for tools that cannot trust the FAT. */
 const uint8_t *mos_cluster(const mos_image *img, int cluster);
