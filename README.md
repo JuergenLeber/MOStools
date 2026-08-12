@@ -9,9 +9,10 @@ but for MOS disks:
 |--------------|---------------------------------------------------------|
 | `mosls`      | list the directory of a MOS disk image                  |
 | `moscp`      | copy files out of a MOS disk image                      |
+| `mosbasic`   | list tokenised MOS BASIC programs as readable text      |
 | `mosrecover` | rebuild file chains from the data when the FAT is stale |
 
-All three are read-only; they never modify the image.
+All four are read-only; they never modify the image.
 
 ## Build
 
@@ -132,6 +133,65 @@ Without `-t` you get the file exactly as it sits on the disk: whole 256-byte
 sectors, the logical end marked by `0x1a`, and the rest of the last sector
 zero-filled. That padding is on the disk, not an extraction fault — `-t` cuts
 there, and `-u` fixes the umlauts.
+
+### Listing BASIC programs
+
+A file with attribute `80` is a tokenised BASIC program — binary, and unreadable
+with `moscp`. `mosbasic` turns it back into a listing:
+
+```sh
+$ mosbasic -u alphatronic-system30.img
+AUTOLOAD:
+10 ON ERROR GOTO 450
+15 DEFINT I:FIELD#0,128 AS X$,128 AS Y$
+20 CE$=CHR$(27)+CHR$(19):CA$=CHR$(27)+CHR$(18)
+30 E$=R$+"  Diskette nicht formatiert oder schreibgeschützt oder nicht im Laufwerk  !   "+N$
+60 PRINT C$;H$;CA$;R$"           A  U  T  O  L  O  A  D         V 1.1         Copyright by TA         "N$
+...
+```
+
+```sh
+mosbasic [-u] [-T sysimage] [-x] [-S] [-f format] image [pattern ...]
+mosbasic [-u] [-T sysimage] [-x] -r file ...
+```
+
+* `-u` translate the German 7-bit characters to UTF-8, in strings and comments
+  alike; bytes above 0x7f (the alphatronic graphics characters) are shown as
+  `{xx}` so the output stays valid UTF-8
+* `-r` the arguments are program files already extracted with `moscp`
+* `-T sysimage` read the token table out of the BASIC interpreter on that system
+  disk instead of using the built-in one
+* `-x` append `{xx}` after every token, to inspect the encoding
+
+**The token table is not guesswork.** MOS BASIC keeps its keywords inside the
+interpreter, which lives in the reserved system area of a system disk, so the
+table was read out of a real one — the built-in table is BASIC Rev. 3.00 from an
+`AUTOLOAD` disk, 144 keywords and 10 operators. Passing `-T` re-reads it at run
+time and produces byte-identical output, which is how the built-in copy was
+checked; use it if you meet a disk written by a different BASIC revision.
+
+Getting at it needs one trick worth recording: the system area is **not** a flat
+code image. Every sector there starts with a marker byte (`0xf6` on sector 0 of
+a track, `0xff` elsewhere), so the code has to be stitched together from 255-byte
+pieces before the table can be read. Ignore that and keywords spanning a sector
+boundary come out corrupt — `REMOVE` reads as `REMOV`, `FRE` gets the wrong
+token.
+
+In the table itself each entry is the keyword minus its first letter, which is
+implied by the group it sits in, with bit 7 set on the last character and the
+token following. A token below 0x80 means a function, written in programs as
+`0xff` plus `0x80 + token`; after the Z group come the operators as
+(character | 0x80, token) pairs, which is where `+`, `=`, `<` and the `'`
+comment shorthand come from.
+
+Numbers are stored binary and are decoded back: line numbers, one-byte and
+two-byte integers, `&H` and `&O` constants, and Microsoft binary format single
+and double precision floats. A comment written with an apostrophe is stored as
+`:REM'` and is printed as `'` again, the way the machine lists it.
+
+Checked against every program on three disks: no unknown tokens, and every
+`GOTO`/`GOSUB`/`THEN` target resolves to a line that exists (except on the disk
+with the stale FAT, where the programs themselves are truncated).
 
 ### Recovering a disk with a stale FAT
 

@@ -6,7 +6,7 @@ CFLAGS  += -std=c99 -Wall -Wextra -Wpedantic
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 
-PROGS   = mosls moscp mosrecover
+PROGS   = mosls moscp mosrecover mosbasic
 OBJS    = mosfs.o mosimd.o
 
 all: $(PROGS)
@@ -20,7 +20,10 @@ moscp: moscp.o $(OBJS)
 mosrecover: mosrecover.o $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ mosrecover.o $(OBJS)
 
-mosfs.o mosls.o moscp.o mosrecover.o: mosfs.h
+mosbasic: mosbasic.o $(OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ mosbasic.o $(OBJS) -lm
+
+mosfs.o mosls.o moscp.o mosrecover.o mosbasic.o: mosfs.h
 mosfs.o mosimd.o: mosimd.h
 
 .c.o:
@@ -32,6 +35,8 @@ install: all
 
 check: all
 	./mosls -v -l alphatronic-system30.img
+	./mosbasic -u alphatronic-system30.img | head -12
+	./mosrecover alphatronic-system30.img
 
 clean:
 	rm -f $(PROGS) *.o

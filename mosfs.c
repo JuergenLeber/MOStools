@@ -638,31 +638,30 @@ long mos_crlf_to_lf(uint8_t *buf, long len)
  * DIN 66003 / ISO 646-DE: the alphatronic uses the German 7 bit variant, so
  * these seven positions carry umlauts instead of the ASCII punctuation.
  */
+const char *mos_de_char(uint8_t c)
+{
+	switch (c) {
+	case 0x5b: return "\xc3\x84";   /* AE */
+	case 0x5c: return "\xc3\x96";   /* OE */
+	case 0x5d: return "\xc3\x9c";   /* UE */
+	case 0x7b: return "\xc3\xa4";   /* ae */
+	case 0x7c: return "\xc3\xb6";   /* oe */
+	case 0x7d: return "\xc3\xbc";   /* ue */
+	case 0x7e: return "\xc3\x9f";   /* sz */
+	default:   return NULL;
+	}
+}
+
 char *mos_de_to_utf8(const uint8_t *buf, long len, long *outlen)
 {
-	static const struct { uint8_t c; const char *utf8; } map[] = {
-		{ 0x5b, "\xc3\x84" },  /* AE */
-		{ 0x5c, "\xc3\x96" },  /* OE */
-		{ 0x5d, "\xc3\x9c" },  /* UE */
-		{ 0x7b, "\xc3\xa4" },  /* ae */
-		{ 0x7c, "\xc3\xb6" },  /* oe */
-		{ 0x7d, "\xc3\xbc" },  /* ue */
-		{ 0x7e, "\xc3\x9f" }   /* sz */
-	};
 	char *out;
 	long i, n = 0;
-	size_t k;
 
 	if ((out = malloc((size_t)len * 2 + 1)) == NULL)
 		return NULL;
 	for (i = 0; i < len; i++) {
-		const char *rep = NULL;
+		const char *rep = mos_de_char(buf[i]);
 
-		for (k = 0; k < sizeof map / sizeof map[0]; k++)
-			if (buf[i] == map[k].c) {
-				rep = map[k].utf8;
-				break;
-			}
 		if (rep != NULL) {
 			out[n++] = rep[0];
 			out[n++] = rep[1];

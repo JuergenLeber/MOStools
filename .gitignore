@@ -2,6 +2,7 @@
 mosls
 moscp
 mosrecover
+mosbasic
 
 # disk images are not part of the source tree
 *.img

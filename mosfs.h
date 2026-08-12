@@ -171,6 +171,9 @@ int  mos_match(const char *pattern, const char *name, int casefold);
  * mos_de_to_utf8() DIN 66003 (German 7 bit) -> UTF-8, returns malloc()ed
  *                  buffer, or NULL when out of memory.
  */
+/* UTF-8 for one DIN 66003 character, or NULL when it is plain ASCII. */
+const char *mos_de_char(uint8_t c);
+
 long  mos_text_len(const uint8_t *buf, long len);
 long  mos_crlf_to_lf(uint8_t *buf, long len);
 char *mos_de_to_utf8(const uint8_t *buf, long len, long *outlen);
