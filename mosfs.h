@@ -1,5 +1,5 @@
 /*
- * mosfs.h - read-only access to alphatronic P2 "MOS" floppy filesystems
+ * mosfs.h - read-only access to alphatronic "MOS" floppy filesystems (FAT8)
  *
  * Part of MOStools.  See README.md for a description of the on-disk format.
  *
@@ -42,9 +42,10 @@
 #define MOS_ATTR_DATA     0x00u
 
 /* Special FAT byte values.  Everything below the cluster count is a
- * "next cluster" pointer. */
+ * "next cluster" pointer.  The end-of-file marker takes the range 0xc0 up to
+ * 0xc0 + sectors per cluster, so how far it reaches depends on the format:
+ * 0xc0..0xc4 with four sector clusters, 0xc0..0xc8 with eight. */
 #define MOS_FAT_LAST      0xc0u  /* 0xc0 + n: last cluster, n sectors used */
-#define MOS_FAT_LAST_MASK 0xf8u
 #define MOS_FAT_RESERVED  0xfeu  /* system area / directory track          */
 #define MOS_FAT_FREE      0xffu  /* unallocated                            */
 
@@ -61,15 +62,21 @@
 #define MOS_SCAN_ALL      0x01   /* do not stop at the first 0xff entry    */
 #define MOS_KEEP_DELETED  0x02   /* report deleted entries as well         */
 
+/*
+ * A disk format.  On a double sided disk the two sides of a cylinder follow
+ * each other in the image (C0H0, C0H1, C1H0, ...), so the logical track
+ * number of a sector is track * heads + head; see mos_logical_track().
+ */
 typedef struct {
 	const char *name;
 	const char *desc;
 	int tracks;            /* cylinders                                   */
-	int heads;             /* sides (only 1 is supported so far)           */
-	int sectors;           /* sectors per track                            */
+	int heads;             /* sides                                        */
+	int sectors;           /* sectors per track and side                   */
 	int sector_size;       /* bytes per sector                             */
 	int cluster_sectors;   /* sectors per allocation unit                  */
-	int dir_track;         /* track holding directory, FAT and config      */
+	int dir_track;         /* cylinder holding directory, FAT and config   */
+	int dir_head;          /* side of that cylinder                        */
 	int dir_sector;        /* first directory sector within that track     */
 	int dir_sectors;       /* number of directory sectors                  */
 	int fat_sector;        /* first FAT copy within the directory track    */
@@ -98,7 +105,7 @@ typedef struct {
 	char     *path;
 	uint8_t  *data;
 	long      size;
-	char      source[128];   /* how the image was read in, for reporting  */
+	char      source[192];   /* how the image was read in, for reporting  */
 	uint8_t  *secstatus;     /* MOS_SEC_* per sector, NULL when all fine  */
 	int       sec_error;     /* sectors read with an error                */
 	int       sec_missing;   /* sectors absent from the image             */
@@ -123,6 +130,9 @@ typedef struct {
 const mos_format *mos_format_find(const char *name);
 const mos_format *mos_format_detect(long image_size);
 const mos_format *mos_format_at(int index);   /* NULL terminated list */
+
+/* Position of one side of one cylinder in the linear sector numbering. */
+int  mos_logical_track(const mos_format *f, int track, int head);
 
 /* Open/close.  On failure -1 is returned and err holds a message. */
 int  mos_open(mos_image *img, const char *path, const mos_format *fmt,

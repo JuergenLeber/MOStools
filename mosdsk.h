@@ -1,5 +1,5 @@
 /*
- * mosimd.h - decode ImageDisk (.imd) files into a flat sector image
+ * mosdsk.h - decode CPCEMU .dsk images into a flat sector image
  *
  * Part of MOStools.
  *
@@ -14,8 +14,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
  * Public License in the file LICENSE for more details.
  */
-#ifndef MOSIMD_H
-#define MOSIMD_H
+#ifndef MOSDSK_H
+#define MOSDSK_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -24,32 +24,32 @@ typedef struct {
 	uint8_t *data;         /* flat image, malloc()ed                       */
 	long     size;
 	uint8_t *status;       /* one MOS_SEC_* byte per sector, malloc()ed    */
-	int      tracks;       /* logical tracks after collapsing double steps */
+	int      tracks;       /* cylinders                                    */
+	int      heads;        /* sides decoded                                */
+	int      heads_seen;   /* bitmask of sides that carry sectors          */
 	int      sectors;      /* sectors per track                            */
 	int      sector_size;
-	int      head;         /* first head that was decoded                  */
-	int      heads;        /* number of heads decoded, starting at head    */
-	int      heads_seen;
-	int      doublestep;   /* image held only even cylinders               */
 	int      first_sector; /* lowest sector number in the maps             */
-	int      bad;          /* sectors read with a data error               */
+	int      extended;     /* "EXTENDED CPC DSK File" rather than "MV - "  */
+	int      bad;          /* sectors the FDC flagged as a data error      */
 	int      deleted;      /* sectors with a deleted address mark          */
 	int      missing;      /* sectors absent from the image                */
 	int      outside;      /* physical sectors outside the logical layout  */
-} mos_imd;
+	int      weak;         /* sectors stored more than once, first used    */
+	char     creator[15];  /* header field, trailing blanks removed        */
+} mos_dsk;
 
-/* Does this buffer look like an ImageDisk file? */
-int  mos_imd_detect(const uint8_t *buf, long len);
+/* Does this buffer look like a CPCEMU disk image? */
+int  mos_dsk_detect(const uint8_t *buf, long len);
 
 /*
  * Decode into a flat image.  want_heads is the number of sides the caller
- * needs; 0 or 1 decode the first head only, which is what a single sided MOS
- * disk wants even when the capture brought its back side along.  Returns 0,
- * or -1 with a message in err.
+ * needs, or 0 to decode every side that carries sectors.  Returns 0, or -1
+ * with a message in err.
  */
-int  mos_imd_load(const uint8_t *buf, long len, int want_heads, mos_imd *out,
+int  mos_dsk_load(const uint8_t *buf, long len, int want_heads, mos_dsk *out,
                   char *err, size_t errlen);
 
-void mos_imd_free(mos_imd *imd);
+void mos_dsk_free(mos_dsk *dsk);
 
-#endif /* MOSIMD_H */
+#endif /* MOSDSK_H */

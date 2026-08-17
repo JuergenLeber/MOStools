@@ -1,5 +1,5 @@
 /*
- * moscp - copy files out of an alphatronic P2 MOS disk image
+ * moscp - copy files out of an alphatronic MOS disk image
  *
  * Copyright (c) 2026 Jürgen Leber
  * SPDX-License-Identifier: GPL-3.0-or-later

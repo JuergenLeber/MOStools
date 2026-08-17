@@ -1,9 +1,10 @@
 # MOStools
 
-Tools for reading floppy disk images of the **Triumph-Adler alphatronic P2**
-running **MOS** (Micro Operating System) — the native MOS filesystem, *not*
-CP/M. Think `cpmls`/`cpmcp` from [cpmtools](http://www.moria.de/~michael/cpmtools/),
-but for MOS disks:
+Tools for reading floppy disk images of the **Triumph-Adler alphatronic P2** and
+**TA-PC 8** running **MOS** (Micro Operating System) — the native MOS
+filesystem, usually called **FAT8** after its one-byte-per-cluster allocation
+table, and *not* CP/M. Think `cpmls`/`cpmcp` from
+[cpmtools](http://www.moria.de/~michael/cpmtools/), but for MOS disks:
 
 | tool         | purpose                                                 |
 |--------------|---------------------------------------------------------|
@@ -24,36 +25,53 @@ make install                # PREFIX=/usr/local by default
 No dependencies beyond a C99 compiler and POSIX `fnmatch()`.
 
 Disk images are deliberately not part of this repository (see `.gitignore`).
-The examples below use `alphatronic-system30.img`, a 160 KB MOS 3.0 system
-disk; `make check` runs `mosls` against it.
+The examples below use `alphatronic-system30.img`, a 160 KB P2 MOS 3.0 system
+disk, and `DISK-BASIC-SYSTEM.dsk`, a 320 KB PC 8 utility disk; `make check` runs
+the tools against whichever of them is present.
 
 ## Input formats
 
-All three tools take either a **flat sector image** (`.img`, 163840 bytes for a
-160 KB disk) or an **ImageDisk file** (`.imd`, as written by ImageDisk, HxC and
-similar), detected by content rather than by file name. Prefer `.imd` when you
-have it, because a flat image cannot carry two things that matter:
+All four tools take a **flat sector image** (`.img`, 163840 bytes for a 160 KB
+disk), an **ImageDisk file** (`.imd`, as written by ImageDisk, HxC and similar)
+or a **CPCEMU disk image** (`.dsk`, both the original and the extended variant;
+this is what HxC and most flux tools write for a PC 8 disk). The container is
+detected by content, not by file name. Prefer `.imd` or `.dsk` when you have
+one, because a flat image cannot carry two things that matter:
 
-* **Whether each sector actually read.** IMD records CRC/data errors, deleted
-  address marks and unreadable sectors per sector. A flat image turns those into
+* **Whether each sector actually read.** Both formats record CRC/data errors,
+  deleted address marks and unreadable sectors per sector — IMD in its record
+  type, DSK in the FDC result bytes ST1 and ST2. A flat image turns those into
   zeros, which `mosrecover` would then cheerfully treat as file data. With an
-  IMD, the tools name the affected files instead, and `moscp` exits non-zero
-  rather than pretending the copy is complete.
+  IMD or DSK, the tools name the affected files instead, and `moscp` exits
+  non-zero rather than pretending the copy is complete.
 * **The sector numbers as read.** Some P2 system disks carry a deliberately
   misnumbered sector on track 0 as copy protection — sector 19 where 16 belongs,
   which the drive reports as a CRC error. `mosls -v` says so and marks the
   missing logical sector, instead of depending on what a converter decided.
 
-Odd captures are handled too: a 40-track disk read in an 80-track drive lands on
-even cylinders only, and side 2 of a single-sided disk is often captured as
-well. Both are collapsed automatically, and `mosls -v` reports what was used:
+Sector numbering is taken as it is found: the P2 numbers its sectors from 0, the
+PC 8 from 1, and the PC 8 also writes them with an interleave of 4, which the
+sector map sorts out. Odd captures are handled too: a 40-track disk read in an
+80-track drive lands on even cylinders only, and side 2 of a single-sided disk
+is often captured as well. Both are collapsed automatically, and `mosls -v`
+reports what was used:
 
 ```
 Source:     ImageDisk, 40 tracks x 16 sectors x 256 bytes, head 0, double stepped, second head ignored
+Source:     extended CPC DSK, 40 tracks x 2 sides x 16 sectors x 256 bytes, by HxC2.14.4.1
 ```
 
-Head 0 is always used, since MOS disks are single sided; there is no switch for
-picking side 2 because no two-sided MOS disk exists here to test it against.
+### Which sides get decoded
+
+A `.dsk` carries every side its writer recorded, and that is what gets decoded —
+a PC 8 image comes out double sided, a P2 image single sided. An `.imd` is a
+rawer capture, and reading a single-sided disk in a double-sided drive routinely
+brings a meaningless back side along, so only the first head is decoded there
+unless you ask for more.
+
+`-f` settles it either way: the requested format says how many sides the
+filesystem needs, and the container is decoded to match. `-f mos320` reads both
+heads out of an IMD, `-f mos160` takes only side 0 out of a two-sided container.
 
 ## Usage
 
@@ -72,6 +90,26 @@ Warning:    FAT area ends at cluster 8c (junk from 8d on), 20 cluster(s) unaccou
 attr start clst  sec     size  name
   80    4e     4   16     4096  AUTOLOAD
 1 file(s), 4096 bytes
+```
+
+A double sided PC 8 disk differs only in the geometry it reports:
+
+```
+$ mosls -v -l DISK-BASIC-SYSTEM.dsk
+Image:      DISK-BASIC-SYSTEM.dsk (327680 bytes)
+Source:     extended CPC DSK, 40 tracks x 2 sides x 16 sectors x 256 bytes, by HxC2.14.4.1
+Format:     mos320 - double sided, 40 tracks, 16 sectors, 256 bytes/sector
+Geometry:   40 tracks x 2 sides x 16 sectors x 256 bytes, 8 sectors/cluster, 160 clusters
+Directory:  track 18 side 1, sectors 0-10
+Space:      38 clusters used, 104 free (212992 bytes), 18 reserved
+Warning:    3 allocated cluster(s) not owned by any file
+
+attr start clst  sec     size  name
+  80    29     3   19     4864  FORMAT
+  80    49     3   20     5120  SYSCOP
+  80    43     3   19     4864  DISCOP
+...
+13 file(s), 58624 bytes
 ```
 
 A data disk with a label and an autostart command, and with more than one file
@@ -160,22 +198,34 @@ mosbasic [-u] [-T sysimage] [-x] -r file ...
   `{xx}` so the output stays valid UTF-8
 * `-r` the arguments are program files already extracted with `moscp`
 * `-T sysimage` read the token table out of the BASIC interpreter on that system
-  disk instead of using the built-in one
+  disk instead of the one on the image being listed
 * `-x` append `{xx}` after every token, to inspect the encoding
 
 **The token table is not guesswork.** MOS BASIC keeps its keywords inside the
 interpreter, which lives in the reserved system area of a system disk, so the
-table was read out of a real one — the built-in table is BASIC Rev. 3.00 from an
-`AUTOLOAD` disk, 144 keywords and 10 operators. Passing `-T` re-reads it at run
-time and produces byte-identical output, which is how the built-in copy was
-checked; use it if you meet a disk written by a different BASIC revision.
+table is read out of a real one: if the image being listed carries an
+interpreter, `mosbasic` uses *its* table and says so on stderr, and only falls
+back to the built-in one otherwise. The built-in table is BASIC Rev. 3.00 from a
+P2 `AUTOLOAD` disk, 144 keywords and 10 operators; reading that same disk's
+interpreter reproduces it byte for byte, which is how the built-in copy was
+checked.
 
-Getting at it needs one trick worth recording: the system area is **not** a flat
-code image. Every sector there starts with a marker byte (`0xf6` on sector 0 of
-a track, `0xff` elsewhere), so the code has to be stitched together from 255-byte
-pieces before the table can be read. Ignore that and keywords spanning a sector
-boundary come out corrupt — `REMOVE` reads as `REMOV`, `FRE` gets the wrong
-token.
+That fallback matters, because **the two machines do not share token numbers.**
+On a PC 8 disk the P2 table turns `COLOR` into `PRESET`, `LINE` into `DEFDBL`
+and the `'` comment shorthand into `VARPTR` — plausible-looking BASIC that is
+simply wrong. Listing a PC 8 disk with the built-in table would have been silent
+nonsense, which is why the disk's own interpreter wins by default.
+
+Getting at the table needs one trick worth recording, and it differs between the
+machines. On the P2 the system area is **not** a flat code image: every sector
+there starts with a marker byte (`0xf6` on sector 0 of a track, `0xff`
+elsewhere), so the code has to be stitched together from 255-byte pieces before
+the table can be read. Ignore that and keywords spanning a sector boundary come
+out corrupt — `REMOVE` reads as `REMOV`, `FRE` gets the wrong token. The PC 8
+stores the same area flat, with no marker byte. `mosbasic` tells the two apart
+by those leading bytes rather than by guessing, because reading it the wrong way
+still finds the start of the table — four bytes rarely straddle a sector
+boundary — and corrupts everything after the first boundary.
 
 In the table itself each entry is the keyword minus its first letter, which is
 implied by the group it sits in, with bit 7 set on the last character and the
@@ -189,9 +239,11 @@ two-byte integers, `&H` and `&O` constants, and Microsoft binary format single
 and double precision floats. A comment written with an apostrophe is stored as
 `:REM'` and is printed as `'` again, the way the machine lists it.
 
-Checked against every program on three disks: no unknown tokens, and every
+Checked against every program on four disks: no unknown tokens, and every
 `GOTO`/`GOSUB`/`THEN` target resolves to a line that exists (except on the disk
-with the stale FAT, where the programs themselves are truncated).
+with the stale FAT, where the programs themselves are truncated). On the PC 8
+disk that is 12 programs, 1678 lines and 401 jump targets, all with its own
+token table.
 
 ### Recovering a disk with a stale FAT
 
@@ -281,10 +333,15 @@ ends the program.
 
 ## The MOS disk format
 
-Reverse-engineered from two 160 KB disks — a MOS 3.0 system disk and a data
-disk — and verified by walking the BASIC line links of the programs on both
-across every cluster of their chains. Parts that are still unknown are marked
-as such; corrections welcome.
+Reverse-engineered from two 160 KB P2 disks — a MOS 3.0 system disk and a data
+disk — and one 320 KB PC 8 disk, and verified by walking the BASIC line links of
+the programs on all of them across every cluster of their chains. Parts that are
+still unknown are marked as such; corrections welcome.
+
+The two machines run the same filesystem: same directory entry, same FAT
+encoding, same configuration sector, same layout inside the system track. What
+the PC 8 changes is the geometry around it — two sides, twice the cluster size —
+and its BASIC, which numbers its tokens differently.
 
 The data disk is private, so its image name, its file names and its label appear
 here as stand-ins. Everything technical about it — sizes, cluster numbers,
@@ -292,25 +349,44 @@ attributes, chains — is unchanged.
 
 ### Geometry
 
-The only geometry confirmed so far (`mos160`) is 40 tracks × 16 sectors ×
-256 bytes = 163840 bytes, single sided, sectors in linear order in the image
-file (`LSN = track * 16 + sector`) with no interleave — the sector maps in five
-IMD captures are all `1…16` in ascending order, so the flat layout is faithful.
+Two geometries are confirmed:
+
+| format   | disk               | bytes  | tracks | sides | sectors | sector | cluster |
+|----------|--------------------|--------|--------|-------|---------|--------|---------|
+| `mos160` | alphatronic P2     | 163840 | 40     | 1     | 16      | 256    | 4 sec   |
+| `mos320` | TA-PC 8            | 327680 | 40     | 2     | 16      | 256    | 8 sec   |
+
+Sectors sit in linear order in the image file with no interleave. On a double
+sided disk the two sides of a cylinder follow each other, so
+
+```
+LSN = (cylinder * sides + head) * 16 + sector
+```
+
+which is the usual flat convention and, more to the point, the one the FAT
+agrees with: it marks clusters `0x4a` and `0x4b` — sectors 592 to 607 — as the
+system track, and that is exactly cylinder 18 side 1 under this formula and
+nothing sensible under a side-major one.
+
 The format is picked by image size; `-f` forces one.
 
-A `mos80` profile (same layout with 128-byte sectors, 81920 bytes) is included
+A `mos80` profile (single sided, 128-byte sectors, 81920 bytes) is included
 because the MOS floppy driver supported 80 KB media, but it is **unverified** —
 no such image was available for testing.
 
 ### Allocation units
 
-Four consecutive sectors form one **cluster** of 1024 bytes, giving 160
-clusters (`0x00`–`0x9f`) on a 160 KB disk. Everything is allocated in whole
-clusters.
+Consecutive sectors form one **cluster**, and both disks come out at 160
+clusters (`0x00`–`0x9f`) — 4 sectors of 1 KB on the P2, 8 sectors of 2 KB on the
+PC 8. That is not a coincidence: a FAT entry is a single byte and the values
+from `0xc0` up are taken, so a 320 KB disk cannot be allocated in 1 KB units and
+still be addressable. Everything is allocated in whole clusters.
 
 ### The system track
 
-Track 20 — the middle of the disk — holds all metadata:
+The middle of the disk holds all metadata — track 20 on the P2, the *back* of
+cylinder 18 on the PC 8 (logical track 37 of 80, again the middle). The layout
+inside that track is identical on both:
 
 | sector  | content                                    |
 |---------|--------------------------------------------|
@@ -320,9 +396,10 @@ Track 20 — the middle of the disk — holds all metadata:
 | 13 – 15 | three identical copies of the FAT          |
 
 MOS itself lives at the start of the disk. How much of it is reserved varies:
-7 tracks on the data disk, 10 tracks on the system disk. Both that area and the
-system track are marked reserved in the FAT, so the FAT is the authority — not
-a fixed track count.
+7 tracks on the P2 data disk, 10 on the P2 system disk, 8 logical tracks (four
+whole cylinders) on the PC 8 system disk. Both that area and the system track
+are marked reserved in the FAT, so the FAT is the authority — not a fixed track
+count.
 
 ### Directory entry (16 bytes)
 
@@ -351,15 +428,17 @@ One byte per cluster, indexed by cluster number:
 | value           | meaning                                                   |
 |-----------------|-----------------------------------------------------------|
 | `0x00`–`0x9f`   | number of the next cluster of this file                    |
-| `0xc0` + *n*    | last cluster; *n* = 0…4 sectors of it are used             |
+| `0xc0` + *n*    | last cluster; *n* = 0…4 (P2) or 0…8 (PC 8) sectors used    |
 | `0xfe`          | reserved (MOS system area, system track)                  |
 | `0xff`          | free                                                      |
 
-So a file's size is `(clusters - 1) * 1024 + n * 256` bytes, i.e. exact to the
-sector; the byte-exact end of a text file is its `0x1a` mark. `0xc0` means zero
-sectors used: a file that was created but never written. Chains are not
-monotonic — MOS reuses whatever is free, so a chain may run backwards over the
-disk.
+So a file's size is `(clusters - 1) * clustersize + n * 256` bytes, i.e. exact
+to the sector; the byte-exact end of a text file is its `0x1a` mark. `0xc0`
+means zero sectors used: a file that was created but never written. Note that
+the end marker reaches as far as the cluster is big — `0xc8` is a legal value on
+a PC 8 disk and junk on a P2 one. Chains are not monotonic — MOS reuses whatever
+is free, so a chain may run backwards over the disk; on the PC 8 sample every
+one of them does.
 
 `mosls` takes a per-byte majority vote over the three copies and warns when
 they disagree.
@@ -427,12 +506,16 @@ FAT and will not guess.
 ## Status and ideas
 
 * Read-only. Writing (`mosput`, delete, format) is not implemented.
-* A BASIC detokeniser (`mosbasic`) to turn saved programs into readable
-  listings would be the obvious next tool; the token table still has to be
-  extracted from the MOS BASIC ROM. It would also sharpen `mosrecover`: a
-  detokeniser rejects a wrong continuation that merely has valid line links.
-* Only `mos160` is verified. If you have an 80 KB image, or one from a P3/P4
-  with a different geometry, please open an issue with a sample.
+* `mos160` and `mos320` are verified against real disks; `mos80` is not. If you
+  have an 80 KB image, or one from a P3/P4 with a different geometry, please
+  open an issue with a sample.
+* The PC 8 sample is a utility disk with an all-zero configuration sector, so
+  the label, date and autostart fields are unverified on that machine — the code
+  reads them at the same offsets as on the P2, which is the obvious assumption
+  but still an assumption.
+* Only one PC 8 BASIC revision has been seen. Its token table is read off the
+  disk rather than built in, so another revision should just work, but nothing
+  here proves it.
 
 ## License
 

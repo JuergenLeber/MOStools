@@ -1,5 +1,5 @@
 /*
- * mosfs.c - read-only access to alphatronic P2 "MOS" floppy filesystems
+ * mosfs.c - read-only access to alphatronic "MOS" floppy filesystems (FAT8)
  *
  * Copyright (c) 2026 Jürgen Leber
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -13,23 +13,44 @@
  * Public License in the file LICENSE for more details.
  */
 #include "mosfs.h"
+#include "mosdsk.h"
 #include "mosimd.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <fnmatch.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
+/*
+ * Field order after name and description:
+ *
+ *   trk  hd  sec  ssize  clsec  dirtrk  dirhd  dirsec  dirn  fat  fatn  cfg  ok
+ *
+ * The layout inside the directory track is the same on every format seen so
+ * far; what changes between the single and the double sided disk is the
+ * cluster size (the FAT holds one byte per cluster, so 320 KB has to be
+ * allocated in 2 KB units to stay under 256 clusters) and where that track
+ * sits - the middle of the disk either way, which on a double sided one is
+ * the back of cylinder 18.
+ */
 static const mos_format formats[] = {
 	{ "mos160", "single sided, 40 tracks, 16 sectors, 256 bytes/sector",
-	  40, 1, 16, 256, 4, 20, 0, 11, 13, 3, 12, 1 },
+	   40,  1,  16,  256,   4,     20,     0,      0,   11,  13,   3,   12,  1 },
+	{ "mos320", "double sided, 40 tracks, 16 sectors, 256 bytes/sector",
+	   40,  2,  16,  256,   8,     18,     1,      0,   11,  13,   3,   12,  1 },
 	{ "mos80",  "single sided, 40 tracks, 16 sectors, 128 bytes/sector",
-	  40, 1, 16, 128, 4, 20, 0, 11, 13, 3, 12, 0 },
-	{ NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+	   40,  1,  16,  128,   4,     20,     0,      0,   11,  13,   3,   12,  0 },
+	{ NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
+
+int mos_logical_track(const mos_format *f, int track, int head)
+{
+	return track * f->heads + head;
+}
 
 const mos_format *mos_format_at(int index)
 {
@@ -70,19 +91,13 @@ static long lsn_offset(const mos_image *img, long lsn)
 	return lsn * img->fmt->sector_size;
 }
 
-static const uint8_t *dir_sector(const mos_image *img, int n)
+/* Sector within the track that holds directory, FAT and configuration. */
+static const uint8_t *meta_sector(const mos_image *img, int sector)
 {
 	const mos_format *f = img->fmt;
-	long lsn = (long)f->dir_track * f->sectors + f->dir_sector + n;
+	long lt = mos_logical_track(f, f->dir_track, f->dir_head);
 
-	return img->data + lsn_offset(img, lsn);
-}
-
-static const uint8_t *track_sector(const mos_image *img, int track, int sector)
-{
-	const mos_format *f = img->fmt;
-
-	return img->data + lsn_offset(img, (long)track * f->sectors + sector);
+	return img->data + lsn_offset(img, lt * f->sectors + sector);
 }
 
 static int read_file(const char *path, uint8_t **buf, long *len,
@@ -119,51 +134,115 @@ static int read_file(const char *path, uint8_t **buf, long *len,
 	return 0;
 }
 
-/*
- * Load the image.  ImageDisk files are decoded into the same flat layout the
- * rest of the code works on, but keep their per sector read status.
- */
-static int read_image(mos_image *img, const char *path, char *err, size_t errlen)
+static void source_note(mos_image *img, const char *fmt, ...)
 {
+	size_t n = strlen(img->source);
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(img->source + n, sizeof img->source - n, fmt, ap);
+	va_end(ap);
+}
+
+static int load_imd(mos_image *img, const uint8_t *raw, long rawlen,
+                    int want_heads, char *err, size_t errlen)
+{
+	mos_imd imd;
+
+	if (mos_imd_load(raw, rawlen, want_heads, &imd, err, errlen) != 0)
+		return -1;
+	img->data = imd.data;
+	img->size = imd.size;
+	img->secstatus = imd.status;
+	img->sec_error = imd.bad;
+	img->sec_missing = imd.missing;
+	img->sec_deleted = imd.deleted;
+
+	snprintf(img->source, sizeof img->source, "ImageDisk, %d tracks", imd.tracks);
+	if (imd.heads > 1)
+		source_note(img, " x %d sides", imd.heads);
+	source_note(img, " x %d sectors x %d bytes", imd.sectors, imd.sector_size);
+	if (imd.heads == 1)
+		source_note(img, ", head %d", imd.head);
+	if (imd.doublestep)
+		source_note(img, ", double stepped");
+	if ((imd.heads_seen >> (imd.head + imd.heads)) != 0)
+		source_note(img, ", second head ignored");
+	if (imd.outside > 0)
+		source_note(img, ", %d misnumbered sector(s) dropped", imd.outside);
+	return 0;
+}
+
+static int load_dsk(mos_image *img, const uint8_t *raw, long rawlen,
+                    int want_heads, char *err, size_t errlen)
+{
+	mos_dsk dsk;
+
+	if (mos_dsk_load(raw, rawlen, want_heads, &dsk, err, errlen) != 0)
+		return -1;
+	img->data = dsk.data;
+	img->size = dsk.size;
+	img->secstatus = dsk.status;
+	img->sec_error = dsk.bad;
+	img->sec_missing = dsk.missing;
+	img->sec_deleted = dsk.deleted;
+
+	snprintf(img->source, sizeof img->source, "%sCPC DSK, %d tracks",
+	         dsk.extended ? "extended " : "", dsk.tracks);
+	if (dsk.heads > 1)
+		source_note(img, " x %d sides", dsk.heads);
+	source_note(img, " x %d sectors x %d bytes", dsk.sectors, dsk.sector_size);
+	if (dsk.creator[0] != '\0')
+		source_note(img, ", by %s", dsk.creator);
+	if ((dsk.heads_seen >> dsk.heads) != 0)
+		source_note(img, ", second head ignored");
+	if (dsk.weak > 0)
+		source_note(img, ", %d weak sector(s), first copy used", dsk.weak);
+	if (dsk.outside > 0)
+		source_note(img, ", %d misnumbered sector(s) dropped", dsk.outside);
+	return 0;
+}
+
+/*
+ * Load the image.  ImageDisk and CPC DSK files are decoded into the same flat
+ * layout the rest of the code works on, but keep their per sector read status.
+ * A forced format decides how many sides to take out of a container that holds
+ * more than the filesystem needs.
+ */
+static int read_image(mos_image *img, const char *path, const mos_format *fmt,
+                      char *err, size_t errlen)
+{
+	int want_heads = fmt != NULL ? fmt->heads : 0;
 	uint8_t *raw;
 	long rawlen;
+	int rc;
 
 	if (read_file(path, &raw, &rawlen, err, errlen) != 0)
 		return -1;
 
-	if (!mos_imd_detect(raw, rawlen)) {
+	if (mos_imd_detect(raw, rawlen))
+		rc = load_imd(img, raw, rawlen, want_heads, err, errlen);
+	else if (mos_dsk_detect(raw, rawlen))
+		rc = load_dsk(img, raw, rawlen, want_heads, err, errlen);
+	else {
 		img->data = raw;
 		img->size = rawlen;
 		snprintf(img->source, sizeof img->source, "flat sector image");
 		return 0;
 	}
+	free(raw);
+	return rc;
+}
 
-	{
-		mos_imd imd;
-
-		if (mos_imd_load(raw, rawlen, &imd, err, errlen) != 0) {
-			free(raw);
-			return -1;
-		}
-		free(raw);
-		img->data = imd.data;
-		img->size = imd.size;
-		img->secstatus = imd.status;
-		img->sec_error = imd.bad;
-		img->sec_missing = imd.missing;
-		img->sec_deleted = imd.deleted;
-		snprintf(img->source, sizeof img->source,
-		         "ImageDisk, %d tracks x %d sectors x %d bytes, head %d%s%s",
-		         imd.tracks, imd.sectors, imd.sector_size, imd.head,
-		         imd.doublestep ? ", double stepped" : "",
-		         (imd.heads_seen & ~(1 << imd.head)) ? ", second head ignored"
-		                                             : "");
-		if (imd.outside > 0)
-			snprintf(img->source + strlen(img->source),
-			         sizeof img->source - strlen(img->source),
-			         ", %d misnumbered sector(s) dropped", imd.outside);
-		return 0;
-	}
+/*
+ * End of a cluster chain: 0xc0 plus the number of sectors used in this, the
+ * last cluster.  The range therefore grows with the cluster size, but stays
+ * well clear of 0xfe and 0xff for any cluster a single FAT byte can address.
+ */
+static int fat_is_last(const mos_image *img, uint8_t v)
+{
+	return v >= MOS_FAT_LAST &&
+	       (unsigned)(v - MOS_FAT_LAST) <= (unsigned)img->fmt->cluster_sectors;
 }
 
 /*
@@ -178,8 +257,8 @@ static int fat_value_ok(const mos_image *img, uint8_t v)
 {
 	if (v < img->nclusters)
 		return 1;                       /* pointer to the next cluster   */
-	if ((v & MOS_FAT_LAST_MASK) == MOS_FAT_LAST)
-		return (v - MOS_FAT_LAST) <= (unsigned)img->fmt->cluster_sectors;
+	if (fat_is_last(img, v))
+		return 1;
 	return v == MOS_FAT_RESERVED || v == MOS_FAT_FREE;
 }
 
@@ -199,7 +278,7 @@ static void read_fat(mos_image *img)
 
 		memset(count, 0, sizeof count);
 		for (c = 0; c < f->fat_copies; c++)
-			count[track_sector(img, f->dir_track, f->fat_sector + c)[i]]++;
+			count[meta_sector(img, f->fat_sector + c)[i]]++;
 		best = 0;
 		bestcount = -1;
 		for (c = 0; c < 256; c++)
@@ -237,7 +316,7 @@ static void read_config(mos_image *img)
 
 	if (f->cfg_sector < 0 || f->sector_size < 256)
 		return;
-	cfg = track_sector(img, f->dir_track, f->cfg_sector);
+	cfg = meta_sector(img, f->cfg_sector);
 	img->cfg_drives = cfg[MOS_CFG_DRIVES];
 	img->cfg_files = cfg[MOS_CFG_FILES];
 
@@ -302,7 +381,7 @@ static void walk_chain(const mos_image *img, mos_file *file)
 			cur = v;
 			continue;
 		}
-		if ((v & MOS_FAT_LAST_MASK) == MOS_FAT_LAST) {
+		if (fat_is_last(img, v)) {
 			file->last_sectors = v - MOS_FAT_LAST;
 			break;
 		}
@@ -333,7 +412,7 @@ static void read_dir(mos_image *img, unsigned flags)
 		return;
 
 	for (s = 0; s < f->dir_sectors; s++) {
-		const uint8_t *sec = dir_sector(img, s);
+		const uint8_t *sec = meta_sector(img, f->dir_sector + s);
 
 		for (e = 0; e < per_sector; e++) {
 			const uint8_t *raw = sec + e * MOS_DIRENT_SIZE;
@@ -378,7 +457,7 @@ int mos_open(mos_image *img, const char *path, const mos_format *fmt,
 {
 	memset(img, 0, sizeof *img);
 
-	if (read_image(img, path, err, errlen) != 0) {
+	if (read_image(img, path, fmt, err, errlen) != 0) {
 		mos_close(img);
 		return -1;
 	}
@@ -494,7 +573,8 @@ int mos_cluster_is_meta(const mos_image *img, int cluster)
 	const mos_format *f = img->fmt;
 	long first = (long)cluster * f->cluster_sectors;
 	long last = first + f->cluster_sectors - 1;
-	long dir_first = (long)f->dir_track * f->sectors;
+	long dir_first = (long)mos_logical_track(f, f->dir_track, f->dir_head) *
+	                 f->sectors;
 
 	return last >= dir_first && first <= dir_first + f->sectors - 1;
 }

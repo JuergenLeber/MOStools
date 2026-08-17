@@ -199,14 +199,14 @@ static int parse_tracks(const uint8_t *buf, long len, imd_track *tracks,
 	return n;
 }
 
-int mos_imd_load(const uint8_t *buf, long len, mos_imd *out,
+int mos_imd_load(const uint8_t *buf, long len, int want_heads, mos_imd *out,
                  char *err, size_t errlen)
 {
 	imd_track *tracks;
 	int ntracks, i, j;
-	int maxsec = 0, ssize = 0, minsec = 255, maxcyl = 0;
+	int maxsec = 0, ssize = 0, minsec = 255, maxcyl = 0, maxhead = 0;
 	int odd = 0, head, nlogical;
-	long total;
+	long total, nsectors;
 
 	memset(out, 0, sizeof *out);
 	if ((tracks = calloc(IMD_MAX_TRACKS, sizeof *tracks)) == NULL) {
@@ -219,13 +219,20 @@ int mos_imd_load(const uint8_t *buf, long len, mos_imd *out,
 		return -1;
 	}
 
-	/* Which head carries the filesystem?  MOS disks are single sided. */
+	/*
+	 * Which head carries the filesystem?  Single sided MOS disks are the
+	 * norm, and reading one in a double sided drive brings its meaningless
+	 * back side along, so only the first head is decoded unless the caller
+	 * asks for more - which is what a PC 8 disk needs.
+	 */
 	head = -1;
 	for (i = 0; i < ntracks; i++)
 		if (tracks[i].nsec > 0) {
 			out->heads_seen |= 1 << tracks[i].head;
 			if (head < 0 || tracks[i].head < head)
 				head = tracks[i].head;
+			if (tracks[i].head > maxhead)
+				maxhead = tracks[i].head;
 		}
 	if (head < 0) {
 		snprintf(err, errlen, "IMD: no track holds any sector");
@@ -233,11 +240,16 @@ int mos_imd_load(const uint8_t *buf, long len, mos_imd *out,
 		return -1;
 	}
 	out->head = head;
+	out->heads = maxhead - head + 1;
+	if (want_heads < 1)
+		want_heads = 1;
+	if (want_heads < out->heads)
+		out->heads = want_heads;
 
 	for (i = 0; i < ntracks; i++) {
 		imd_track *t = &tracks[i];
 
-		if (t->nsec == 0 || t->head != head)
+		if (t->nsec == 0 || t->head < head || t->head - head >= out->heads)
 			continue;
 		if (ssize == 0)
 			ssize = t->sector_size;
@@ -270,27 +282,28 @@ int mos_imd_load(const uint8_t *buf, long len, mos_imd *out,
 	out->tracks = out->doublestep ? maxcyl / 2 + 1 : maxcyl + 1;
 	nlogical = out->tracks;
 
-	total = (long)nlogical * out->sectors * out->sector_size;
+	nsectors = (long)nlogical * out->heads * out->sectors;
+	total = nsectors * out->sector_size;
 	if (total <= 0) {
 		snprintf(err, errlen, "IMD: empty image");
 		free(tracks);
 		return -1;
 	}
 	if ((out->data = calloc(1, (size_t)total)) == NULL ||
-	    (out->status = malloc((size_t)nlogical * (size_t)out->sectors)) == NULL) {
+	    (out->status = malloc((size_t)nsectors)) == NULL) {
 		snprintf(err, errlen, "out of memory");
 		mos_imd_free(out);
 		free(tracks);
 		return -1;
 	}
 	out->size = total;
-	memset(out->status, MOS_SEC_MISSING, (size_t)nlogical * (size_t)out->sectors);
+	memset(out->status, MOS_SEC_MISSING, (size_t)nsectors);
 
 	for (i = 0; i < ntracks; i++) {
 		imd_track *t = &tracks[i];
 		int lt;
 
-		if (t->nsec == 0 || t->head != head)
+		if (t->nsec == 0 || t->head < head || t->head - head >= out->heads)
 			continue;
 		lt = out->doublestep ? t->cyl / 2 : t->cyl;
 		if (lt >= nlogical)
@@ -304,7 +317,8 @@ int mos_imd_load(const uint8_t *buf, long len, mos_imd *out,
 				out->outside++;         /* misnumbered, e.g. protection */
 				continue;
 			}
-			lsn = (long)lt * out->sectors + index;
+			lsn = ((long)lt * out->heads + (t->head - head)) * out->sectors +
+			      index;
 			off = lsn * out->sector_size;
 			out->status[lsn] = (uint8_t)status_of(t->type[j]);
 			if (t->data[j] != NULL)
@@ -314,7 +328,7 @@ int mos_imd_load(const uint8_t *buf, long len, mos_imd *out,
 		}
 	}
 
-	for (i = 0; i < nlogical * out->sectors; i++)
+	for (i = 0; i < (int)nsectors; i++)
 		switch (out->status[i]) {
 		case MOS_SEC_ERROR:   out->bad++; break;
 		case MOS_SEC_DELETED: out->deleted++; break;

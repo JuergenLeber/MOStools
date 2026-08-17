@@ -1,5 +1,5 @@
 /*
- * mosbasic - list the BASIC programs of an alphatronic P2 MOS disk
+ * mosbasic - list the BASIC programs of an alphatronic MOS disk
  *
  * MOS BASIC stores a program the way Microsoft BASIC does: per line a 16 bit
  * link to the next line, a 16 bit line number, the tokenised text, and a 00
@@ -96,51 +96,34 @@ static const char *mos_function[0x40] = {
 /* ------------------------------------------------------------------ *
  * Reading the token table out of an interpreter on a system disk.
  *
- * The system area does not hold a flat code image: every sector starts with one
- * marker byte, so the code has to be stitched back together from 255 byte
- * pieces first.  In the result the keyword table is a run of groups, one per
- * first letter A to Z, each entry being the rest of the keyword with the last
- * character's bit 7 set, followed by the token.  A token below 0x80 means a
- * function, written as 0xff, 0x80 + token.  After the Z group come the
+ * On the P2 the system area does not hold a flat code image: every sector
+ * starts with one marker byte, so the code has to be stitched back together
+ * from 255 byte pieces first.  A PC 8 system disk keeps its code flat, so both
+ * arrangements are tried.  In the result the keyword table is a run of groups,
+ * one per first letter A to Z, each entry being the rest of the keyword with
+ * the last character's bit 7 set, followed by the token.  A token below 0x80
+ * means a function, written as 0xff, 0x80 + token.  After the Z group come the
  * operators as (character | 0x80, token) pairs.
  * ------------------------------------------------------------------ */
-static int load_table(const char *path, char *err, size_t errlen)
+
+/* Start of the table: the AUTO entry, "UT" 'O'|0x80 and its token, which is
+ * not the same number on every BASIC revision. */
+static long find_table(const uint8_t *code, long clen)
 {
-	mos_image img;
-	uint8_t *code;
-	long clen = 0, i, p = -1;
-	int letter, count = 0;
+	long i;
 
-	if (mos_open(&img, path, NULL, 0, err, errlen) != 0)
-		return -1;
-
-	/* strip the per sector marker byte over the whole disk */
-	if ((code = malloc((size_t)img.size)) == NULL) {
-		snprintf(err, errlen, "out of memory");
-		mos_close(&img);
-		return -1;
-	}
-	for (i = 0; i + img.fmt->sector_size <= img.size; i += img.fmt->sector_size) {
-		memcpy(code + clen, img.data + i + 1,
-		       (size_t)img.fmt->sector_size - 1);
-		clen += img.fmt->sector_size - 1;
-	}
-
-	for (i = 0; i + 4 < clen; i++)          /* the AUTO entry: "UT" O|80 ab */
+	for (i = 0; i + 4 < clen; i++)
 		if (code[i] == 'U' && code[i + 1] == 'T' && code[i + 2] == 0xcf &&
-		    code[i + 3] == 0xab) {
-			p = i;
-			break;
-		}
-	if (p < 0) {
-		snprintf(err, errlen, "%s: no BASIC keyword table found", path);
-		free(code);
-		mos_close(&img);
-		return -1;
-	}
+		    code[i + 3] >= 0x80 && code[i + 3] < 0xff)
+			return i;
+	return -1;
+}
 
-	memset(mos_keyword, 0, sizeof mos_keyword);
-	memset(mos_function, 0, sizeof mos_function);
+/* Read the groups at p into kw/fn.  Returns the number of entries found. */
+static int parse_table(const uint8_t *code, long clen, long p,
+                       const char **kw, const char **fn)
+{
+	int letter, count = 0;
 
 	for (letter = 'A'; letter <= 'Z' && p < clen; letter++) {
 		while (p < clen && code[p] != 0x00) {
@@ -159,11 +142,11 @@ static int load_table(const char *path, char *err, size_t errlen)
 				break;
 			tok = code[p++];
 			if (tok >= 0x80) {
-				if (mos_keyword[tok - 0x80] == NULL)
-					mos_keyword[tok - 0x80] = strdup(word);
+				if (kw[tok - 0x80] == NULL)
+					kw[tok - 0x80] = strdup(word);
 			} else if (tok < 0x40) {
-				if (mos_function[tok] == NULL)
-					mos_function[tok] = strdup(word);
+				if (fn[tok] == NULL)
+					fn[tok] = strdup(word);
 			}
 			count++;
 		}
@@ -176,26 +159,94 @@ static int load_table(const char *path, char *err, size_t errlen)
 
 		if (c < 0x20 || c > 0x7e)
 			break;
-		if (mos_keyword[tok - 0x80] == NULL) {
+		if (kw[tok - 0x80] == NULL) {
 			char *s = malloc(2);
 
 			if (s != NULL) {
 				s[0] = c;
 				s[1] = '\0';
-				mos_keyword[tok - 0x80] = s;
+				kw[tok - 0x80] = s;
 			}
 		}
 		p += 2;
 		count++;
 	}
+	return count;
+}
+
+/*
+ * Does the system area carry the per sector marker byte?  On the P2 every
+ * sector of it starts with 0xf6 or 0xff, so the code has to be stitched
+ * together from 255 byte pieces; a PC 8 system disk keeps its code flat and
+ * these bytes are ordinary opcodes.  Reading it the wrong way still finds the
+ * start of the table - four bytes rarely straddle a sector boundary - but
+ * every keyword behind the first boundary comes out corrupt, so the question
+ * has to be settled before parsing rather than by scoring the result.
+ */
+static int has_sector_markers(const mos_image *img)
+{
+	long ssize = img->fmt->sector_size;
+	int i, n = 0, marked = 0;
+
+	for (i = 0; (i + 1) * ssize <= img->size && i < 64; i++, n++)
+		if (img->data[i * ssize] == 0xf6 || img->data[i * ssize] == 0xff)
+			marked++;
+	return n > 0 && marked * 4 >= n * 3;
+}
+
+/* Leave the table in place unless a whole new one was read. */
+static int load_table(const char *path, char *err, size_t errlen)
+{
+	const char *kw[0x80] = { NULL }, *fn[0x40] = { NULL };
+	mos_image img;
+	uint8_t *code = NULL;
+	const uint8_t *text;
+	long clen, i, p;
+	int count;
+
+	if (mos_open(&img, path, NULL, 0, err, errlen) != 0)
+		return -1;
+
+	if (has_sector_markers(&img)) {
+		if ((code = malloc((size_t)img.size)) == NULL) {
+			snprintf(err, errlen, "out of memory");
+			mos_close(&img);
+			return -1;
+		}
+		clen = 0;
+		for (i = 0; i + img.fmt->sector_size <= img.size;
+		     i += img.fmt->sector_size) {
+			memcpy(code + clen, img.data + i + 1,
+			       (size_t)img.fmt->sector_size - 1);
+			clen += img.fmt->sector_size - 1;
+		}
+		text = code;
+	} else {
+		text = img.data;
+		clen = img.size;
+	}
+
+	if ((p = find_table(text, clen)) < 0) {
+		snprintf(err, errlen, "%s: no BASIC keyword table found", path);
+		free(code);
+		mos_close(&img);
+		return -1;
+	}
+	count = parse_table(text, clen, p, kw, fn);
 
 	free(code);
 	mos_close(&img);
 	if (count < 50) {
 		snprintf(err, errlen, "%s: only %d tokens found, not a BASIC system"
 		         " disk?", path, count);
+		for (i = 0; i < 0x80; i++)
+			free((void *)kw[i]);
+		for (i = 0; i < 0x40; i++)
+			free((void *)fn[i]);
 		return -1;
 	}
+	memcpy(mos_keyword, kw, sizeof mos_keyword);
+	memcpy(mos_function, fn, sizeof mos_function);
 	return 0;
 }
 
@@ -400,8 +451,8 @@ static void usage(FILE *fp, int status)
 	        "\n"
 	        "  -u            translate German 7 bit characters to UTF-8\n"
 	        "  -r            arguments are already extracted program files\n"
-	        "  -T sysimage   take the token table from this system disk instead\n"
-	        "                of using the built in one (BASIC Rev. 3.00)\n"
+	        "  -T sysimage   take the token table from this system disk rather\n"
+	        "                than from the image being listed\n"
 	        "  -S            match patterns case sensitively\n"
 	        "  -f format     force a disk format instead of guessing by size\n"
 	        "  -x            append {xx} after every token, to inspect encodings\n"
@@ -415,7 +466,7 @@ static void usage(FILE *fp, int status)
 int main(int argc, char **argv)
 {
 	const mos_format *fmt = NULL;
-	int utf8 = 0, raw = 0, casefold = 1, hexdump = 0;
+	int utf8 = 0, raw = 0, casefold = 1, hexdump = 0, have_table = 0;
 	int opt, i, j, listed = 0, rc = 0;
 	char err[512];
 	mos_image img;
@@ -434,6 +485,7 @@ int main(int argc, char **argv)
 				fprintf(stderr, "%s: %s\n", progname, err);
 				return 1;
 			}
+			have_table = 1;
 			break;
 		case 'f':
 			if ((fmt = mos_format_find(optarg)) == NULL) {
@@ -491,6 +543,16 @@ int main(int argc, char **argv)
 		}
 		return rc;
 	}
+
+	/*
+	 * BASIC revisions do not agree on their token numbers - the P2 and the
+	 * PC 8 differ throughout - so an interpreter sitting on the disk being
+	 * listed beats the built-in table.  Only a system disk carries one;
+	 * anything else quietly keeps the built-in one.
+	 */
+	if (!have_table && load_table(argv[optind], err, sizeof err) == 0)
+		fprintf(stderr, "%s: token table read from %s\n", progname,
+		        argv[optind]);
 
 	if (mos_open(&img, argv[optind], fmt, 0, err, sizeof err) != 0) {
 		fprintf(stderr, "%s: %s\n", progname, err);

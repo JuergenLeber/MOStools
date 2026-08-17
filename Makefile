@@ -7,7 +7,7 @@ PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 
 PROGS   = mosls moscp mosrecover mosbasic
-OBJS    = mosfs.o mosimd.o
+OBJS    = mosfs.o mosimd.o mosdsk.o
 
 all: $(PROGS)
 
@@ -25,6 +25,7 @@ mosbasic: mosbasic.o $(OBJS)
 
 mosfs.o mosls.o moscp.o mosrecover.o mosbasic.o: mosfs.h
 mosfs.o mosimd.o: mosimd.h
+mosfs.o mosdsk.o: mosdsk.h
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -33,10 +34,16 @@ install: all
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 $(PROGS) $(DESTDIR)$(BINDIR)
 
+CHECK_IMAGES = alphatronic-system30.img DISK-BASIC-SYSTEM.dsk
+
 check: all
-	./mosls -v -l alphatronic-system30.img
-	./mosbasic -u alphatronic-system30.img | head -12
-	./mosrecover alphatronic-system30.img
+	@for img in $(CHECK_IMAGES); do \
+		[ -f "$$img" ] || { echo "skipping $$img (not here)"; continue; }; \
+		echo "=== $$img ==="; \
+		./mosls -v -l "$$img" || exit 1; \
+		./mosbasic -u "$$img" | head -12 || exit 1; \
+		./mosrecover "$$img" || exit 1; \
+	done
 
 clean:
 	rm -f $(PROGS) *.o

@@ -1,5 +1,5 @@
 /*
- * mosls - list the contents of an alphatronic P2 MOS disk image
+ * mosls - list the contents of an alphatronic MOS disk image
  *
  * Copyright (c) 2026 Jürgen Leber
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -65,11 +65,20 @@ static void print_verbose_header(const mos_image *img)
 	printf("Image:      %s (%ld bytes)\n", img->path, img->size);
 	printf("Source:     %s\n", img->source);
 	printf("Format:     %s - %s\n", f->name, f->desc);
-	printf("Geometry:   %d tracks x %d sectors x %d bytes, %d sectors/cluster,"
-	       " %d clusters\n", f->tracks, f->sectors, f->sector_size,
-	       f->cluster_sectors, img->nclusters);
-	printf("Directory:  track %d, sectors %d-%d\n", f->dir_track, f->dir_sector,
-	       f->dir_sector + f->dir_sectors - 1);
+	if (f->heads > 1)
+		printf("Geometry:   %d tracks x %d sides x %d sectors x %d bytes,"
+		       " %d sectors/cluster, %d clusters\n", f->tracks, f->heads,
+		       f->sectors, f->sector_size, f->cluster_sectors, img->nclusters);
+	else
+		printf("Geometry:   %d tracks x %d sectors x %d bytes,"
+		       " %d sectors/cluster, %d clusters\n", f->tracks, f->sectors,
+		       f->sector_size, f->cluster_sectors, img->nclusters);
+	if (f->heads > 1)
+		printf("Directory:  track %d side %d, sectors %d-%d\n", f->dir_track,
+		       f->dir_head, f->dir_sector, f->dir_sector + f->dir_sectors - 1);
+	else
+		printf("Directory:  track %d, sectors %d-%d\n", f->dir_track,
+		       f->dir_sector, f->dir_sector + f->dir_sectors - 1);
 	if (img->label[0] != '\0' || img->date[0] != '\0')
 		printf("Label:      %s%s%s\n", img->label,
 		       img->date[0] != '\0' ? "  " : "", img->date);
